@@ -37,6 +37,10 @@ On each game launch, the DLL reads `WTF/Account/*/SavedVariables/Guda.lua` from 
 1. Delete `GudaIO.dll` from the game folder
 2. Remove the `GudaIO.dll` line from `dlls.txt`
 
+## Disclaimer
+
+This project is not affiliated with or endorsed by Blizzard Entertainment. World of Warcraft is a registered trademark of Blizzard Entertainment, Inc. This software is provided for use with private servers running client version 1.12.1.
+
 ## License
 
 MIT License - see [LICENSE](LICENSE) for details.
