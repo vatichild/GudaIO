@@ -153,15 +153,25 @@ static void RegisterLuaFunction(const char* name, void* func) {
 // Polling thread — re-registers functions every 3s to survive /reload
 // ============================================================================
 
+static void SafeRegisterAll() {
+    // Wrap in SEH to catch access violations during Lua state transitions (/reload, logout)
+    __try {
+        RegisterLuaFunction(s_setName,  (void*)LuaSetRaidTarget);
+        RegisterLuaFunction(s_getName,  (void*)LuaGetRaidTarget);
+        RegisterLuaFunction(s_guidName, (void*)LuaUnitGUID);
+        RegisterLuaFunction(s_unitGuid, (void*)LuaUnitGUID);
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER) {
+        // Lua state is invalid (reload/logout in progress) — skip silently
+    }
+}
+
 static DWORD WINAPI InitThread(LPVOID) {
     // Wait for game to initialize (Lua state must be ready)
     Sleep(15000);
 
     while (true) {
-        RegisterLuaFunction(s_setName,  (void*)LuaSetRaidTarget);
-        RegisterLuaFunction(s_getName,  (void*)LuaGetRaidTarget);
-        RegisterLuaFunction(s_guidName, (void*)LuaUnitGUID);
-        RegisterLuaFunction(s_unitGuid, (void*)LuaUnitGUID);  // Same function, standard API name
+        SafeRegisterAll();
         Sleep(3000);
     }
 
