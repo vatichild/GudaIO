@@ -18,6 +18,7 @@ add_definitions(-D_CRT_SECURE_NO_WARNINGS)
 add_library(GudaIO SHARED
     src/DllMain.cpp
     src/AccountMerge.cpp
+    src/RaidTarget.cpp
 )
 
 target_include_directories(GudaIO PRIVATE src)
