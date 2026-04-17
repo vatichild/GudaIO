@@ -157,14 +157,17 @@ static void RegisterAllFunctions() {
 // Trampoline: saved bytes + jump back to original+N
 static uint8_t s_trampoline[16];
 static uint8_t s_savedBytes[8];
-static const int HOOK_SIZE = 5;  // 5-byte JMP
+
+// Function pointer to the trampoline (cast to callable)
+typedef void (__cdecl *TrampolineFunc_t)();
+static TrampolineFunc_t pTrampoline = (TrampolineFunc_t)(void*)s_trampoline;
 
 static void __declspec(naked) HookedCreateEvents() {
     __asm {
-        // Call the original function via trampoline
-        call s_trampoline
+        // Call the original via trampoline function pointer
+        call pTrampoline
 
-        // Now register our Lua functions (we're on the main thread!)
+        // Register our Lua functions (main thread, safe!)
         pushad
     }
 
