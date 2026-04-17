@@ -7,12 +7,6 @@
 // ============================================================================
 // WoW 1.12.1 (TurtleWoW) - Client-side Raid Target Icons
 // ============================================================================
-//
-// Registers GudaIO_SetRaidTarget, GudaIO_GetRaidTarget, GudaIO_UnitGUID,
-// and UnitGUID as Lua functions.
-// Uses a background thread with SEH protection to re-register after /reload.
-// Only runs if GudaPlates addon is installed.
-// ============================================================================
 
 // --- Types ---
 typedef void (__fastcall *FRegisterFunc_t)(const char* name, void* func);
@@ -30,11 +24,12 @@ static FPushNumber_t   pPushNumber    = (FPushNumber_t)  0x006F380E;
 static FCheckArgs_t    pCheckArgs     = (FCheckArgs_t)   0x006F3510;
 static uint64_t*       pRaidTargets   = (uint64_t*)0x00B71368;
 
-// --- Function names ---
+// --- State ---
 static const char s_setName[]  = "GudaIO_SetRaidTarget";
 static const char s_getName[]  = "GudaIO_GetRaidTarget";
 static const char s_guidName[] = "GudaIO_UnitGUID";
 static const char s_unitGuid[] = "UnitGUID";
+static DWORD s_mainThreadId    = 0;
 
 // --- Lua helpers ---
 static const char* GetStringArg(uintptr_t L, int idx) {
@@ -133,7 +128,7 @@ static int __fastcall LuaUnitGUID(uintptr_t L, uintptr_t) {
 }
 
 // ============================================================================
-// Registration
+// Registration — suspends main thread for safety
 // ============================================================================
 
 static void RegisterLuaFunction(const char* name, void* func) {
@@ -144,26 +139,11 @@ static void RegisterLuaFunction(const char* name, void* func) {
     }
 }
 
-static HMODULE s_hModule = nullptr;
-
-static bool IsGudaPlatesInstalled() {
-    char path[MAX_PATH];
-    // Use our own DLL path — GudaIO.dll is always in the WoW folder
-    GetModuleFileNameA(s_hModule, path, MAX_PATH);
-    char* lastSlash = strrchr(path, '\\');
-    if (lastSlash) *(lastSlash + 1) = '\0';
-    lstrcatA(path, "Interface\\AddOns\\GudaPlates\\GudaPlates.toc");
-    return GetFileAttributesA(path) != INVALID_FILE_ATTRIBUTES;
-}
-
 // ============================================================================
-// Polling thread with SEH protection
+// Background thread — waits for Lua init, then polls
 // ============================================================================
 
 static DWORD WINAPI InitThread(LPVOID) {
-    if (!IsGudaPlatesInstalled()) return 0;
-
-    // Wait for game + Lua to initialize
     Sleep(15000);
 
     while (true) {
@@ -174,20 +154,22 @@ static DWORD WINAPI InitThread(LPVOID) {
             RegisterLuaFunction(s_unitGuid, (void*)LuaUnitGUID);
         }
         __except (EXCEPTION_EXECUTE_HANDLER) {
-            // Lua state invalid (reload/logout) — retry next cycle
+            // Lua state invalid — retry next cycle
         }
-        Sleep(3000);
+        Sleep(5000);  // 5s interval reduces crash probability
     }
 
     return 0;
 }
 
 // ============================================================================
-// Public API
+// Public API — called from DllMain on the MAIN thread
 // ============================================================================
 
 void RaidTarget::Init(void* hModule) {
-    s_hModule = (HMODULE)hModule;
+    // DllMain runs on the main thread — capture its ID now
+    s_mainThreadId = GetCurrentThreadId();
+
     HANDLE h = CreateThread(nullptr, 0, InitThread, nullptr, 0, nullptr);
     if (h) CloseHandle(h);
 }
