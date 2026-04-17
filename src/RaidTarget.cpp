@@ -7,29 +7,33 @@
 // ============================================================================
 // WoW 1.12.1 (TurtleWoW) - Client-side Raid Target Icons
 // ============================================================================
+//
+// Hooks FrameScript_CreateEvents (the same function SuperWoW hooks) to
+// register Lua functions on the MAIN THREAD during Lua initialization.
+// Fires at startup and after /reload — no background thread, no crashes.
+// ============================================================================
 
 // --- Types ---
-typedef void (__fastcall *FRegisterFunc_t)(const char* name, void* func);
 typedef const char* (__thiscall *FGetStringArg_t)(uintptr_t L);
 typedef void (__thiscall *FGetNumberArg_t)(uintptr_t L);
 typedef void (__thiscall *FPushNumber_t)(uintptr_t L);
 typedef int  (__thiscall *FCheckArgs_t)(uintptr_t L);
 
 // --- TurtleWoW offsets ---
-static const uintptr_t ADDR_REGISTER  = 0x00704120;
-static const uintptr_t ADDR_UNIT_GUID = 0x00515970;
-static FGetStringArg_t pGetString     = (FGetStringArg_t)0x006F3690;
-static FGetNumberArg_t pGetNumber     = (FGetNumberArg_t)0x006F3619;
-static FPushNumber_t   pPushNumber    = (FPushNumber_t)  0x006F380E;
-static FCheckArgs_t    pCheckArgs     = (FCheckArgs_t)   0x006F3510;
-static uint64_t*       pRaidTargets   = (uint64_t*)0x00B71368;
+static const uintptr_t ADDR_REGISTER       = 0x00704120;
+static const uintptr_t ADDR_UNIT_GUID      = 0x00515970;
+static const uintptr_t ADDR_CREATE_EVENTS  = 0x0051A550;
+static FGetStringArg_t pGetString          = (FGetStringArg_t)0x006F3690;
+static FGetNumberArg_t pGetNumber          = (FGetNumberArg_t)0x006F3619;
+static FPushNumber_t   pPushNumber         = (FPushNumber_t)  0x006F380E;
+static FCheckArgs_t    pCheckArgs          = (FCheckArgs_t)   0x006F3510;
+static uint64_t*       pRaidTargets        = (uint64_t*)0x00B71368;
 
-// --- State ---
+// --- Function names ---
 static const char s_setName[]  = "GudaIO_SetRaidTarget";
 static const char s_getName[]  = "GudaIO_GetRaidTarget";
 static const char s_guidName[] = "GudaIO_UnitGUID";
 static const char s_unitGuid[] = "UnitGUID";
-static DWORD s_mainThreadId    = 0;
 
 // --- Lua helpers ---
 static const char* GetStringArg(uintptr_t L, int idx) {
@@ -128,7 +132,7 @@ static int __fastcall LuaUnitGUID(uintptr_t L, uintptr_t) {
 }
 
 // ============================================================================
-// Registration — suspends main thread for safety
+// Registration helper
 // ============================================================================
 
 static void RegisterLuaFunction(const char* name, void* func) {
@@ -139,37 +143,89 @@ static void RegisterLuaFunction(const char* name, void* func) {
     }
 }
 
-// ============================================================================
-// Background thread — waits for Lua init, then polls
-// ============================================================================
-
-static DWORD WINAPI InitThread(LPVOID) {
-    Sleep(15000);
-
-    while (true) {
-        __try {
-            RegisterLuaFunction(s_setName,  (void*)LuaSetRaidTarget);
-            RegisterLuaFunction(s_getName,  (void*)LuaGetRaidTarget);
-            RegisterLuaFunction(s_guidName, (void*)LuaUnitGUID);
-            RegisterLuaFunction(s_unitGuid, (void*)LuaUnitGUID);
-        }
-        __except (EXCEPTION_EXECUTE_HANDLER) {
-            // Lua state invalid — retry next cycle
-        }
-        Sleep(5000);  // 5s interval reduces crash probability
-    }
-
-    return 0;
+static void RegisterAllFunctions() {
+    RegisterLuaFunction(s_setName,  (void*)LuaSetRaidTarget);
+    RegisterLuaFunction(s_getName,  (void*)LuaGetRaidTarget);
+    RegisterLuaFunction(s_guidName, (void*)LuaUnitGUID);
+    RegisterLuaFunction(s_unitGuid, (void*)LuaUnitGUID);
 }
 
 // ============================================================================
-// Public API — called from DllMain on the MAIN thread
+// Hook on FrameScript_CreateEvents — runs on MAIN THREAD
+// ============================================================================
+
+// Trampoline: saved bytes + jump back to original+N
+static uint8_t s_trampoline[16];
+static uint8_t s_savedBytes[8];
+static const int HOOK_SIZE = 5;  // 5-byte JMP
+
+static void __declspec(naked) HookedCreateEvents() {
+    __asm {
+        // Call the original function via trampoline
+        call s_trampoline
+
+        // Now register our Lua functions (we're on the main thread!)
+        pushad
+    }
+
+    RegisterAllFunctions();
+
+    __asm {
+        popad
+        ret
+    }
+}
+
+static void InstallHook() {
+    // Save original bytes at FrameScript_CreateEvents
+    memcpy(s_savedBytes, (void*)ADDR_CREATE_EVENTS, 8);
+
+    // Build trampoline: execute saved bytes, then jump back
+    // Original prologue: 55 8b ec 83 ec 08 (6 bytes)
+    // We overwrite 5 bytes with JMP, but need 6 in trampoline for complete instructions
+
+    // Check if the first byte is E9 (already hooked by SuperWoW)
+    uint8_t firstByte = s_savedBytes[0];
+    int savedSize;
+
+    if (firstByte == 0xE9) {
+        // Already hooked (SuperWoW's JMP) — save 5 bytes, fix up relative offset
+        savedSize = 5;
+        memcpy(s_trampoline, s_savedBytes, 5);
+        // Fix relative JMP offset: original target = ADDR + 5 + rel32
+        int32_t origRel = *(int32_t*)&s_savedBytes[1];
+        uintptr_t origTarget = ADDR_CREATE_EVENTS + 5 + origRel;
+        int32_t newRel = (int32_t)(origTarget - ((uintptr_t)&s_trampoline[0] + 5));
+        *(int32_t*)&s_trampoline[1] = newRel;
+    } else {
+        // Original prologue — save 6 bytes (complete instructions)
+        savedSize = 6;
+        memcpy(s_trampoline, s_savedBytes, 6);
+    }
+
+    // Add JMP back to original + savedSize
+    s_trampoline[savedSize] = 0xE9;
+    uintptr_t jumpBack = ADDR_CREATE_EVENTS + savedSize;
+    int32_t backRel = (int32_t)(jumpBack - ((uintptr_t)&s_trampoline[savedSize] + 5));
+    *(int32_t*)&s_trampoline[savedSize + 1] = backRel;
+
+    // Make trampoline executable
+    DWORD oldProt;
+    VirtualProtect(s_trampoline, sizeof(s_trampoline), PAGE_EXECUTE_READWRITE, &oldProt);
+
+    // Patch FrameScript_CreateEvents with JMP to our hook
+    VirtualProtect((void*)ADDR_CREATE_EVENTS, 8, PAGE_EXECUTE_READWRITE, &oldProt);
+    uint8_t* target = (uint8_t*)ADDR_CREATE_EVENTS;
+    target[0] = 0xE9;
+    int32_t hookRel = (int32_t)((uintptr_t)&HookedCreateEvents - (ADDR_CREATE_EVENTS + 5));
+    *(int32_t*)&target[1] = hookRel;
+    VirtualProtect((void*)ADDR_CREATE_EVENTS, 8, oldProt, &oldProt);
+}
+
+// ============================================================================
+// Public API
 // ============================================================================
 
 void RaidTarget::Init(void* hModule) {
-    // DllMain runs on the main thread — capture its ID now
-    s_mainThreadId = GetCurrentThreadId();
-
-    HANDLE h = CreateThread(nullptr, 0, InitThread, nullptr, 0, nullptr);
-    if (h) CloseHandle(h);
+    InstallHook();
 }
