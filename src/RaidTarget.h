@@ -2,9 +2,9 @@
 
 namespace RaidTarget {
 
-// Spawns a background thread that waits for the game's Lua engine
-// to initialize, then registers GudaIO_SetRaidTarget(unit, index).
-// Must be called from DllMain (DLL_PROCESS_ATTACH).
-void Init();
+// Spawns a background thread that registers Lua functions:
+// GudaIO_SetRaidTarget, GudaIO_GetRaidTarget, GudaIO_UnitGUID, UnitGUID.
+// Re-registers every 3s to survive /reload. Called from DllMain.
+void Init(void* hModule);
 
 } // namespace RaidTarget

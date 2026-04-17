@@ -10,8 +10,8 @@
 //
 // Registers GudaIO_SetRaidTarget, GudaIO_GetRaidTarget, GudaIO_UnitGUID,
 // and UnitGUID as Lua functions.
-// Uses a polling thread to re-register after /reload.
-// Does NOT hook FrameScript_RegisterFunction (avoids breaking SuperWoW).
+// Uses a background thread with SEH protection to re-register after /reload.
+// Only runs if GudaPlates addon is installed.
 // ============================================================================
 
 // --- Types ---
@@ -92,7 +92,6 @@ static uint64_t GetUnitGUID(const char* token) {
 // Lua C functions
 // ============================================================================
 
-// GudaIO_SetRaidTarget(unit, index)
 static int __fastcall LuaSetRaidTarget(uintptr_t L, uintptr_t) {
     if (!CheckArgs(L, 2)) return 0;
     const char* token = GetStringArg(L, 1);
@@ -101,17 +100,14 @@ static int __fastcall LuaSetRaidTarget(uintptr_t L, uintptr_t) {
     uint64_t guid = GetUnitGUID(token);
     if (guid == 0) return 0;
 
-    // Clear existing entries for this GUID
     for (int i = 0; i < 8; i++)
         if (pRaidTargets[i] == guid) pRaidTargets[i] = 0;
-    // Set new icon (1-8)
     if (icon >= 1 && icon <= 8)
         pRaidTargets[icon - 1] = guid;
 
     return 0;
 }
 
-// GudaIO_GetRaidTarget(unit) -> iconIndex (1-8) or 0
 static int __fastcall LuaGetRaidTarget(uintptr_t L, uintptr_t) {
     if (!CheckArgs(L, 1)) { PushNumber(L, 0); return 1; }
     const char* token = GetStringArg(L, 1);
@@ -125,7 +121,6 @@ static int __fastcall LuaGetRaidTarget(uintptr_t L, uintptr_t) {
     return 1;
 }
 
-// GudaIO_UnitGUID(unit) / UnitGUID(unit) -> hi, lo (two numbers)
 static int __fastcall LuaUnitGUID(uintptr_t L, uintptr_t) {
     if (!CheckArgs(L, 1)) return 0;
     const char* token = GetStringArg(L, 1);
@@ -138,7 +133,7 @@ static int __fastcall LuaUnitGUID(uintptr_t L, uintptr_t) {
 }
 
 // ============================================================================
-// Registration helper
+// Registration
 // ============================================================================
 
 static void RegisterLuaFunction(const char* name, void* func) {
@@ -149,29 +144,38 @@ static void RegisterLuaFunction(const char* name, void* func) {
     }
 }
 
-// ============================================================================
-// Polling thread — re-registers functions every 3s to survive /reload
-// ============================================================================
+static HMODULE s_hModule = nullptr;
 
-static void SafeRegisterAll() {
-    // Wrap in SEH to catch access violations during Lua state transitions (/reload, logout)
-    __try {
-        RegisterLuaFunction(s_setName,  (void*)LuaSetRaidTarget);
-        RegisterLuaFunction(s_getName,  (void*)LuaGetRaidTarget);
-        RegisterLuaFunction(s_guidName, (void*)LuaUnitGUID);
-        RegisterLuaFunction(s_unitGuid, (void*)LuaUnitGUID);
-    }
-    __except (EXCEPTION_EXECUTE_HANDLER) {
-        // Lua state is invalid (reload/logout in progress) — skip silently
-    }
+static bool IsGudaPlatesInstalled() {
+    char path[MAX_PATH];
+    // Use our own DLL path — GudaIO.dll is always in the WoW folder
+    GetModuleFileNameA(s_hModule, path, MAX_PATH);
+    char* lastSlash = strrchr(path, '\\');
+    if (lastSlash) *(lastSlash + 1) = '\0';
+    lstrcatA(path, "Interface\\AddOns\\GudaPlates\\GudaPlates.toc");
+    return GetFileAttributesA(path) != INVALID_FILE_ATTRIBUTES;
 }
 
+// ============================================================================
+// Polling thread with SEH protection
+// ============================================================================
+
 static DWORD WINAPI InitThread(LPVOID) {
-    // Wait for game to initialize (Lua state must be ready)
+    if (!IsGudaPlatesInstalled()) return 0;
+
+    // Wait for game + Lua to initialize
     Sleep(15000);
 
     while (true) {
-        SafeRegisterAll();
+        __try {
+            RegisterLuaFunction(s_setName,  (void*)LuaSetRaidTarget);
+            RegisterLuaFunction(s_getName,  (void*)LuaGetRaidTarget);
+            RegisterLuaFunction(s_guidName, (void*)LuaUnitGUID);
+            RegisterLuaFunction(s_unitGuid, (void*)LuaUnitGUID);
+        }
+        __except (EXCEPTION_EXECUTE_HANDLER) {
+            // Lua state invalid (reload/logout) — retry next cycle
+        }
         Sleep(3000);
     }
 
@@ -182,6 +186,8 @@ static DWORD WINAPI InitThread(LPVOID) {
 // Public API
 // ============================================================================
 
-void RaidTarget::Init() {
-    CreateThread(nullptr, 0, InitThread, nullptr, 0, nullptr);
+void RaidTarget::Init(void* hModule) {
+    s_hModule = (HMODULE)hModule;
+    HANDLE h = CreateThread(nullptr, 0, InitThread, nullptr, 0, nullptr);
+    if (h) CloseHandle(h);
 }
